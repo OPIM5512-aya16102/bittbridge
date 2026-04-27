@@ -264,7 +264,7 @@ def run_preflight(model_params_path: str, non_interactive: bool) -> PreflightRes
             dump_full_dataset = False
             if deploy_selected:
                 dump_full_dataset = _ask_yes_no_preflight(
-                    "Dump full training dataset with engineered features?",
+                    "Dump full training dataset with engineered features? (This may take a ~1-2 minutes)",
                     default_yes=False,
                 )
 
