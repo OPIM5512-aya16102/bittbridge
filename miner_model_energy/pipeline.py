@@ -20,6 +20,7 @@ from .artifacts import (
 )
 from .data_io import TARGET_COLUMN, TARGET_COLUMN_HORIZON, TIMESTAMP_COLUMN, load_train_test
 from .features import (
+    KNOWN_WEATHER_SUFFIXES,
     add_engineered_features,
     add_test_load_features_from_history,
     build_feature_columns,
@@ -87,6 +88,47 @@ def _forecast_horizon_steps(train: pd.DataFrame, horizon_min: int) -> int:
             "implies < 1 step; increase horizon or fix data cadence."
         )
     return steps
+
+
+def _weather_feature_columns(frame: pd.DataFrame) -> List[str]:
+    cols: List[str] = []
+    for col in frame.columns:
+        if not isinstance(col, str):
+            continue
+        if col in {TIMESTAMP_COLUMN, TARGET_COLUMN, TARGET_COLUMN_HORIZON}:
+            continue
+        if "-" not in col:
+            continue
+        suffix = col.rsplit("-", 1)[-1].strip().lower()
+        if suffix in KNOWN_WEATHER_SUFFIXES:
+            cols.append(col)
+    return cols
+
+
+def _apply_supabase_storage_feature_shift(
+    train: pd.DataFrame,
+    config: ModelConfig,
+    show_progress: bool,
+) -> tuple[pd.DataFrame, bool, int]:
+    source = config.data.get("source", "csv")
+    shift_min = int(config.data.get("train_feature_time_shift_min", 0))
+    if source != "supabase_storage" or shift_min <= 0:
+        return train, False, 0
+
+    steps = _forecast_horizon_steps(train, shift_min)
+    cols = _weather_feature_columns(train)
+    if not cols:
+        return train, False, 0
+
+    shifted = train.copy()
+    shifted[cols] = shifted[cols].shift(-steps)
+    if show_progress:
+        print(
+            f"  [train]     Feature shift active: source=supabase_storage, "
+            f"train_feature_time_shift_min={shift_min}, steps={steps}, shifted_cols={len(cols)}",
+            flush=True,
+        )
+    return shifted, True, steps
 
 
 def _fmt_sec(seconds: float) -> str:
@@ -246,6 +288,10 @@ def prepare_training_data(
             f"  [train]     Supabase data pulled: train_shape={train.shape}, test_shape={test.shape}",
             flush=True,
         )
+    train, feature_shift_active, feature_shift_steps = _apply_supabase_storage_feature_shift(
+        train, config, show_progress=show_progress
+    )
+
     suffix_whitelist = config.features.get("include_weather_suffix_groups")
     train = filter_weather_suffix_columns(train, suffix_whitelist)
     test = filter_weather_suffix_columns(test, suffix_whitelist)
@@ -281,18 +327,30 @@ def prepare_training_data(
             "produce the same columns. Check model_params.yaml toggles and CSV schemas."
         )
     horizon_min = int(config.data.get("forecast_horizon_min", 0))
-    steps = _forecast_horizon_steps(train, horizon_min)
-    if steps > 0:
-        train[TARGET_COLUMN_HORIZON] = train[TARGET_COLUMN].shift(-steps)
+    disable_horizon_label_shift = bool(
+        config.data.get("train_disable_horizon_label_shift_when_feature_shifted", False)
+    )
+    steps = 0
+    if feature_shift_active and disable_horizon_label_shift:
         if show_progress:
-            median_m = float(
-                train[TIMESTAMP_COLUMN].diff().dt.total_seconds().div(60.0).median(skipna=True)
-            )
             print(
-                f"  [train]     Horizon target: forecast_horizon_min={horizon_min}, "
-                f"median_dt_min={median_m:.4f}, steps={steps} → `{TARGET_COLUMN_HORIZON}`",
+                f"  [train]     Horizon label shift disabled: "
+                f"feature_shift_steps={feature_shift_steps}, using `{TARGET_COLUMN}` as target.",
                 flush=True,
             )
+    else:
+        steps = _forecast_horizon_steps(train, horizon_min)
+        if steps > 0:
+            train[TARGET_COLUMN_HORIZON] = train[TARGET_COLUMN].shift(-steps)
+            if show_progress:
+                median_m = float(
+                    train[TIMESTAMP_COLUMN].diff().dt.total_seconds().div(60.0).median(skipna=True)
+                )
+                print(
+                    f"  [train]     Horizon target: forecast_horizon_min={horizon_min}, "
+                    f"median_dt_min={median_m:.4f}, steps={steps} → `{TARGET_COLUMN_HORIZON}`",
+                    flush=True,
+                )
 
     required_train_cols = features + [TARGET_COLUMN]
     if steps > 0:
@@ -329,6 +387,8 @@ def train_model(model_type: str, config: ModelConfig) -> TrainingResult:
         train_model, validation_split=config.training["validation_split"]
     )
     y_col = TARGET_COLUMN_HORIZON if TARGET_COLUMN_HORIZON in train_model.columns else TARGET_COLUMN
+    if show_progress:
+        print(f"  [train]     Target column selected: `{y_col}`", flush=True)
     X_train = _as_numpy(train_split, features)
     y_train = train_split[y_col].to_numpy()
     X_val = _as_numpy(val_split, features)

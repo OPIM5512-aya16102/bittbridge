@@ -55,4 +55,8 @@ Constraints:
 - You can use `models_cart.py` as the easiest starting template for non-sequence regressors.
 - Renaming classes alone is not enough; routing in `pipeline.py` and miner preflight selection must be updated.
 - Keep model artifact naming explicit (for example `model_<your_model>.joblib`) to avoid collisions.
+- Shift-based train/prod alignment knobs live in `model_params.yaml` under `data`:
+  - `train_feature_time_shift_min`: shifts raw weather columns forward in training (currently applied for `supabase_storage` source).
+  - `train_disable_horizon_label_shift_when_feature_shifted`: when enabled with shift mode, training uses same-row `Total Load` as label instead of creating `Total Load (horizon)`.
+- This shift mode is a pragmatic approximation for matching production-style forecast inputs.
 
