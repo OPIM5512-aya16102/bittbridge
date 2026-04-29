@@ -539,6 +539,11 @@ def build_lstm_inference_matrix(result: TrainingResult) -> np.ndarray:
 
 
 def predict_single_test_row(result: TrainingResult) -> float:
+    pred, _ = predict_single_test_row_with_context(result)
+    return pred
+
+
+def predict_single_test_row_with_context(result: TrainingResult) -> tuple[float, Dict[str, Any]]:
     X_test = result.test_frame[result.features].astype(float).to_numpy()
     if result.model_type == "linear":
         pred = predict_linear(result.model_bundle, X_test)[0]
@@ -552,7 +557,17 @@ def predict_single_test_row(result: TrainingResult) -> float:
         pred = predict_rnn(result.model_bundle, seq_2d)[0]
     else:
         raise ValueError(f"Unsupported model type: {result.model_type}")
-    return float(pred)
+    input_row = (
+        result.test_frame[result.features].iloc[0].to_dict()
+        if not result.test_frame.empty
+        else {}
+    )
+    context: Dict[str, Any] = {
+        "source": "local_test_frame",
+        "model_type": result.model_type,
+        "model_input_row": input_row,
+    }
+    return float(pred), context
 
 
 def _required_history_rows_for_live(result: TrainingResult, config: ModelConfig) -> int:
@@ -596,9 +611,16 @@ def _build_live_sequence_matrix(
 
 
 def predict_for_timestamp(result: TrainingResult, config: ModelConfig, timestamp_str: str) -> float:
+    pred, _ = predict_for_timestamp_with_context(result, config, timestamp_str)
+    return pred
+
+
+def predict_for_timestamp_with_context(
+    result: TrainingResult, config: ModelConfig, timestamp_str: str
+) -> tuple[float, Dict[str, Any]]:
     source = config.data.get("source", "csv")
     if source not in {"supabase", "supabase_storage"}:
-        return predict_single_test_row(result)
+        return predict_single_test_row_with_context(result)
 
     data_cfg = config.data
     schema = data_cfg["supabase_schema"]
@@ -693,7 +715,22 @@ def predict_for_timestamp(result: TrainingResult, config: ModelConfig, timestamp
         pred = predict_rnn(result.model_bundle, seq)[0]
     else:
         raise ValueError(f"Unsupported model type: {result.model_type}")
-    return float(pred)
+
+    model_input_row = (
+        test_features[result.features].iloc[0].to_dict()
+        if not test_features.empty
+        else {}
+    )
+    latest_train_row = history.iloc[-1].to_dict() if not history.empty else {}
+    context: Dict[str, Any] = {
+        "source": source,
+        "model_type": result.model_type,
+        "requested_timestamp": timestamp_str,
+        "forecast_row_raw": forecast_row,
+        "train_row_latest_raw": latest_train_row,
+        "model_input_row": model_input_row,
+    }
+    return float(pred), context
 
 
 def persist_training_result(
