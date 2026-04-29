@@ -214,8 +214,15 @@ def run_preflight(model_params_path: str, non_interactive: bool) -> PreflightRes
         try:
             cfg = load_model_config(model_params_path)
         except Exception as exc:
-            print(f"  Failed to load model config: {exc}")
-            return PreflightResult(mode="baseline")
+            _section("Custom model config load failed")
+            _sub(f"Could not load model config from: {model_params_path}")
+            _sub(f"Reason: {exc}")
+            _sub(
+                "Please check file path/spelling for model_params.yaml and restart custom model setup."
+            )
+            _sub("Exiting miner. Please fix config and restart.")
+            print()
+            return PreflightResult(mode="exit")
 
         storage_force_refresh_decision = False
         force_refresh_used = False
