@@ -140,7 +140,8 @@ python -m neurons.miner \
   --netuid 183 \
   --subtensor.network test \
   --wallet.name miner \
-  --wallet.hotkey default
+  --wallet.hotkey default \
+  --logging.debug
 ```
 
 In preflight:
