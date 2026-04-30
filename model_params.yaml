@@ -88,6 +88,10 @@ models:
 persistence:
   artifact_dir: artifacts
   save_on_deploy: true
+  # Optional: default plugin folder name for docs / future non-interactive use (interactive miner asks each time).
+  # plugin_folder_name: null
+  # Optional: baseline | exit | train_builtin — reserved for non-interactive custom-plugin fallback defaults.
+  # custom_model_fallback_default: baseline
 
 # ------------------------------------------------------------
 # DATA CONFIGURATION

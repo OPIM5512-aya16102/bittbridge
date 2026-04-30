@@ -60,3 +60,50 @@ Constraints:
   - `train_disable_horizon_label_shift_when_feature_shifted`: when enabled with shift mode, training uses same-row `Total Load` as label instead of creating `Total Load (horizon)`.
 - This shift mode is a pragmatic approximation for matching production-style forecast inputs.
 
+---
+
+## User plugin workflow (external train in Colab / VM)
+
+Miners can export a **plugin folder** under `persistence.artifact_dir` (see `model_params.yaml`) with everything needed to train a custom **regression** model offline, then deploy the saved weights on the next miner start.
+
+### Preflight menu
+
+At startup, choose **[3] Custom model plugin**. You can either:
+
+1. **Create a new folder** — the miner writes:
+   - `training_dataset_full.csv` — engineered training rows (same features as `prepare_training_data` in `pipeline.py`)
+   - `feature_contract.json` — canonical ordered feature list, target column name, horizon/shift flags, validation split hint
+   - `plugin_metadata.json` — schema version, paths, optional `keras_sequence_n_steps` after deploy
+   - `custom_train_colab.ipynb` — starter notebook (sklearn + Keras examples; **do not** change feature columns vs the contract)
+
+2. **Use an existing folder** — after you upload `*.joblib` or `*.keras` (or a TensorFlow SavedModel directory), the miner scans candidates, runs a **compatibility probe** (same live/CSV feature path as `live_probe_feature_matrix_for_custom` in `pipeline.py`), and asks to deploy.
+
+### Contract (A + B)
+
+- **Auto-detect** the model file among allowed artifacts (`.joblib`, `.keras`, `.h5`, SavedModel dirs); if several match, the miner prompts you to pick one.
+- **`plugin_metadata.json` is always required** for a valid plugin folder (created on export).
+
+### Supported custom model types
+
+- **scikit-learn**: any regressor with `.predict(X)` where `X` has shape `(n_samples, n_features)` matching `feature_contract.json` (use a `Pipeline` if you need scaling).
+- **TensorFlow / Keras**: dense input `(batch, n_features)` **or** fixed sequence input `(batch, n_steps, n_features)`; sequence length must match what the live feature builder produces (see built-in LSTM/RNN behavior in `pipeline.py`).
+
+### Deploy-time checks
+
+Before deploy, the miner loads the model and runs one **probe prediction** on engineered features for a current timestamp (Supabase/Supabase Storage) or the nearest test-row timestamp (CSV). Failures (missing columns, wrong shape, NaNs, load errors) are logged and you get:
+
+- **[1] Exit** — stop the miner
+- **[2] Baseline** — run moving-average predictions
+- **[3] Train built-in** — enter the usual linear / cart / rnn / lstm flow
+
+### Security
+
+Loading `joblib` / pickle executes arbitrary code if the file is hostile. Only deploy artifacts you trained yourself or fully trust.
+
+### Code map
+
+- `miner_model_energy/custom_plugin_runtime.py` — export, scan, load, metadata updates
+- `miner_model_energy/pipeline.py` — `live_probe_feature_matrix_for_custom` for probe + runtime inputs
+- `miner_model_energy/inference_runtime.py` — `CustomModelPredictor`
+- `neurons/miner.py` — preflight menus and wiring
+

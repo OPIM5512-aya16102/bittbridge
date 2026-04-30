@@ -233,6 +233,11 @@ def load_model_config(path: str) -> ModelConfig:
     persistence["artifact_dir"] = str(artifact_path)
     persistence["config_file"] = str(cfg_path.resolve())
     persistence["save_on_deploy"] = bool(persistence.get("save_on_deploy", True))
+    persistence["plugin_folder_name"] = _clean_optional_str(persistence.get("plugin_folder_name"))
+    fb = str(persistence.get("custom_model_fallback_default", "baseline")).strip().lower()
+    if fb not in {"baseline", "exit", "train_builtin"}:
+        fb = "baseline"
+    persistence["custom_model_fallback_default"] = fb
 
     return ModelConfig(
         data=data,
