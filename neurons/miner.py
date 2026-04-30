@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 import typing
 import bittensor as bt
+import numpy as np
+import pandas as pd
 
 # Bittensor Miner Template:
 import bittbridge
@@ -34,6 +36,9 @@ from miner_model_energy.inference_runtime import (
 )
 from miner_model_energy.ml_config import load_model_config
 from miner_model_energy.pipeline import (
+    TrainingResult,
+    load_training_bundle_from_manifest,
+    prepare_training_data,
     persist_training_result,
     print_actual_vs_predicted_plotext,
     train_model,
@@ -212,11 +217,12 @@ def _ask_top_level_startup_mode() -> str:
     _sub("  [1]  Baseline moving-average (ISO-NE)")
     _sub("  [2]  Train a built-in model (linear / cart / rnn / lstm)")
     _sub("  [3]  Custom model plugin (export training pack / deploy uploaded model)")
-    _sub("  [4]  Exit miner")
+    _sub("  [4]  Deploy from saved artifact (manifest + model dump)")
+    _sub("  [5]  Exit miner")
     print()
     while True:
         try:
-            answer = input("  Choose [1/2/3/4]: ").strip().lower()
+            answer = input("  Choose [1/2/3/4/5]: ").strip().lower()
         except EOFError:
             return "baseline"
         if answer in ("1", "baseline", "b", "ma"):
@@ -225,9 +231,158 @@ def _ask_top_level_startup_mode() -> str:
             return "prebuilt"
         if answer in ("3", "custom", "plugin", "c"):
             return "custom"
-        if answer in ("4", "exit", "quit", "q"):
+        if answer in ("4", "artifact", "saved", "resume", "manifest"):
+            return "artifact"
+        if answer in ("5", "exit", "quit", "q"):
             raise PreflightExitRequested()
-        print("  Enter 1, 2, 3, or 4.")
+        print("  Enter 1, 2, 3, 4, or 5.")
+
+
+def _iter_saved_artifact_manifests(artifact_root: str) -> list[Path]:
+    root = Path(artifact_root)
+    if not root.is_dir():
+        return []
+    manifests: list[Path] = []
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        m = d / "manifest.json"
+        if not m.is_file():
+            continue
+        try:
+            data = json.loads(m.read_text(encoding="utf-8"))
+            model_rel = data.get("model_path")
+            if model_rel and (d / model_rel).exists():
+                manifests.append(m)
+        except Exception:
+            continue
+    manifests.sort(key=lambda p: p.parent.name, reverse=True)
+    return manifests
+
+
+def _fmt_manifest_line(manifest_path: Path) -> str:
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        model = str(data.get("model_type", "unknown"))
+        metrics = data.get("metrics", {}) or {}
+        val = metrics.get("validation", {}) or {}
+        rmse = val.get("rmse")
+        mae = val.get("mae")
+        r2 = val.get("r2")
+        metric_txt = ""
+        if rmse is not None and mae is not None and r2 is not None:
+            metric_txt = f" | val RMSE={float(rmse):.2f}, MAE={float(mae):.2f}, R2={float(r2):.4f}"
+        return f"{manifest_path.parent.name} ({model}){metric_txt}"
+    except Exception:
+        return manifest_path.parent.name
+
+
+def _print_manifest_metrics(manifest_path: Path) -> None:
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    metrics = data.get("metrics", {}) or {}
+    tr = metrics.get("train") or {}
+    va = metrics.get("validation") or {}
+    _section("Saved artifact metrics")
+    _sub(f"  Folder: {manifest_path.parent.name}")
+    _sub(f"  Model type: {data.get('model_type', 'unknown')}")
+    if tr:
+        _sub(
+            f"  Train      RMSE={float(tr.get('rmse', float('nan'))):.3f}  "
+            f"MAE={float(tr.get('mae', float('nan'))):.3f}  "
+            f"MAPE={float(tr.get('mape', float('nan'))):.3f}%  "
+            f"R2={float(tr.get('r2', float('nan'))):.5f}"
+        )
+    if va:
+        _sub(
+            f"  Validation RMSE={float(va.get('rmse', float('nan'))):.3f}  "
+            f"MAE={float(va.get('mae', float('nan'))):.3f}  "
+            f"MAPE={float(va.get('mape', float('nan'))):.3f}%  "
+            f"R2={float(va.get('r2', float('nan'))):.5f}"
+        )
+    print()
+
+
+def _ask_pick_saved_artifact(artifact_root: str) -> Optional[Path]:
+    manifests = _iter_saved_artifact_manifests(artifact_root)
+    if not manifests:
+        return None
+    _section("Saved artifacts with manifest.json")
+    for i, m in enumerate(manifests, 1):
+        _sub(f"  [{i}]  {_fmt_manifest_line(m)}")
+    print()
+    while True:
+        try:
+            answer = input(f"  Choose [1-{len(manifests)}] or [q] exit: ").strip().lower()
+        except EOFError:
+            return manifests[0]
+        if answer in {"q", "quit", "exit"}:
+            raise PreflightExitRequested()
+        if answer.isdigit():
+            idx = int(answer)
+            if 1 <= idx <= len(manifests):
+                return manifests[idx - 1]
+        print("  Invalid choice.")
+
+
+def _load_training_result_from_manifest_preflight(
+    manifest_path: Path,
+    cfg: object,
+) -> TrainingResult:
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    model_type = str(data.get("model_type", ""))
+    features = list(data.get("features") or [])
+    if not model_type or not features:
+        raise ValueError(f"Manifest missing model_type/features: {manifest_path}")
+    bundle = load_training_bundle_from_manifest(str(manifest_path))
+
+    source = cfg.data.get("source", "csv")
+    if source in {"supabase", "supabase_storage"}:
+        train_frame = pd.DataFrame()
+        test_frame = pd.DataFrame()
+        shapes = {
+            "X_train": (0, len(features)),
+            "X_val": (0, len(features)),
+            "X_test": (1, len(features)),
+            "y_train": (0,),
+            "y_val": (0,),
+        }
+    else:
+        train_frame, test_frame, features_live = prepare_training_data(cfg, show_progress=False)
+        missing = [c for c in features if c not in test_frame.columns]
+        if missing:
+            raise ValueError(
+                "Saved artifact features are missing from current CSV inference frame: "
+                + ", ".join(missing[:20])
+            )
+        train_frame = train_frame[features].copy()
+        test_frame = test_frame[features].copy()
+        if set(features_live) != set(features):
+            bt.logging.warning(
+                "Saved artifact features differ from current CSV feature set; using manifest feature order."
+            )
+        shapes = {
+            "X_train": tuple(train_frame.shape),
+            "X_val": (0, len(features)),
+            "X_test": tuple(test_frame.shape),
+            "y_train": (0,),
+            "y_val": (0,),
+        }
+
+    metrics = data.get("metrics", {}) or {}
+    return TrainingResult(
+        model_type=model_type,
+        model_bundle=bundle,
+        metrics=metrics,
+        features=features,
+        train_frame=train_frame,
+        test_frame=test_frame,
+        shapes=shapes,
+        y_train=np.array([]),
+        train_pred=np.array([]),
+        y_val=np.array([]),
+        val_pred=np.array([]),
+        durations_sec=data.get("durations_sec", {}) or {},
+    )
 
 
 def _ask_custom_deploy_failure_next() -> str:
@@ -504,6 +659,36 @@ def run_preflight(model_params_path: str, non_interactive: bool) -> PreflightRes
             if not need_prebuilt:
                 return PreflightResult(mode="exit")
             startup = "prebuilt"
+
+        if startup == "artifact":
+            manifest_path = _ask_pick_saved_artifact(cfg.persistence["artifact_dir"])
+            if manifest_path is None:
+                _section("No saved artifacts")
+                _sub("No manifest.json + model dumps found under artifacts. Choose another startup mode.")
+                print()
+                return PreflightResult(mode="baseline")
+            if _ask_yes_no_preflight("Show training metrics from this artifact?", default_yes=True):
+                _print_manifest_metrics(manifest_path)
+            result = _load_training_result_from_manifest_preflight(manifest_path, cfg)
+            if not _ask_yes_no_preflight(
+                f"Deploy this saved artifact? ({manifest_path.parent.name})",
+                default_yes=True,
+            ):
+                next_step = _ask_after_deploy_decline()
+                if next_step == "exit":
+                    raise PreflightExitRequested()
+                if next_step == "baseline":
+                    return PreflightResult(mode="baseline")
+                startup = "prebuilt"
+            else:
+                _section("Ready")
+                _sub(f"Deployed saved artifact model: {manifest_path.parent.name}")
+                print()
+                return PreflightResult(
+                    mode=f"artifact:{result.model_type}:{manifest_path.parent.name}",
+                    training_result=result,
+                    model_config=cfg,
+                )
 
         if startup == "prebuilt":
             while True:
