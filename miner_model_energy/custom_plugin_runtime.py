@@ -174,6 +174,33 @@ def scan_model_candidates(plugin_dir: Path) -> List[Path]:
     return candidates
 
 
+def _load_keras_saved_model(path: str) -> Any:
+    """Load .keras / SavedModel with version-tolerant options and clear errors."""
+    try:
+        from tensorflow.keras.models import load_model
+    except Exception as exc:
+        raise RuntimeError(
+            "TensorFlow/Keras is required to load Keras models. Install tensorflow."
+        ) from exc
+    last_err: Exception | None = None
+    for compile_flag in (False, True):
+        try:
+            return load_model(path, compile=compile_flag)
+        except Exception as exc:
+            last_err = exc
+            continue
+    assert last_err is not None
+    msg = str(last_err)
+    if "quantization_config" in msg or "Unrecognized keyword" in msg:
+        raise RuntimeError(
+            "This Keras model was saved with a newer Keras (e.g. Colab) than your VM's TensorFlow "
+            "can deserialize (often `quantization_config` on Dense). Fix: upgrade TensorFlow on the "
+            "miner VM to match Colab (e.g. `pip install -U 'tensorflow>=2.16'` then retry), or re-save "
+            "the model in Colab using the same TF/Keras major version as the VM."
+        ) from last_err
+    raise RuntimeError(f"Could not load Keras model from {path!r}: {last_err}") from last_err
+
+
 def _infer_keras_sequence_steps(model: Any) -> Tuple[Optional[int], str]:
     """Returns (n_steps or None for dense 2D input, rank hint '2d'|'3d')."""
     shp = getattr(model, "input_shape", None)
@@ -212,13 +239,7 @@ class CustomModelWrapper:
 def load_custom_model(path: Path) -> CustomModelWrapper:
     suf = path.suffix.lower()
     if path.is_dir():
-        try:
-            from tensorflow.keras.models import load_model
-        except Exception as exc:
-            raise RuntimeError(
-                "TensorFlow/Keras is required to load SavedModel directory."
-            ) from exc
-        model = load_model(str(path))
+        model = _load_keras_saved_model(str(path))
         n_steps, rank = _infer_keras_sequence_steps(model)
         if rank == "3d_unknown":
             raise ValueError(
@@ -241,11 +262,7 @@ def load_custom_model(path: Path) -> CustomModelWrapper:
         )
 
     if suf == ".keras" or suf == ".h5":
-        try:
-            from tensorflow.keras.models import load_model
-        except Exception as exc:
-            raise RuntimeError("TensorFlow/Keras is required to load .keras/.h5 models.") from exc
-        model = load_model(str(path))
+        model = _load_keras_saved_model(str(path))
         n_steps, rank = _infer_keras_sequence_steps(model)
         if rank == "3d_unknown":
             raise ValueError(
@@ -332,7 +349,13 @@ def run_deploy_compatibility_probe(
                     f"model input n_steps={seq_steps}."
                 )
 
-    X, _ctx = live_probe_feature_matrix_for_custom(cfg, timestamp_str, features, seq_steps)
+    X, _ctx = live_probe_feature_matrix_for_custom(
+        cfg,
+        timestamp_str,
+        features,
+        seq_steps,
+        use_resilient_forecast_fetch=True,
+    )
     validate_custom_model_probe(wrapper, X, features)
     return wrapper, seq_steps, X
 

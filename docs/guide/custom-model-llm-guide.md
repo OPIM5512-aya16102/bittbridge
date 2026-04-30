@@ -56,7 +56,7 @@ Constraints:
 - Renaming classes alone is not enough; routing in `pipeline.py` and miner preflight selection must be updated.
 - Keep model artifact naming explicit (for example `model_<your_model>.joblib`) to avoid collisions.
 - Shift-based train/prod alignment knobs live in `model_params.yaml` under `data`:
-  - `train_feature_time_shift_min`: shifts raw weather columns forward in training (currently applied for `supabase_storage` source).
+- `train_feature_time_shift_min`: shifts raw weather columns forward in training and, when enabled, derives time/cyclical features from the same shifted timestamp (currently applied for `supabase_storage` source).
   - `train_disable_horizon_label_shift_when_feature_shifted`: when enabled with shift mode, training uses same-row `Total Load` as label instead of creating `Total Load (horizon)`.
 - This shift mode is a pragmatic approximation for matching production-style forecast inputs.
 
@@ -95,6 +95,12 @@ Before deploy, the miner loads the model and runs one **probe prediction** on en
 - **[1] Exit** — stop the miner
 - **[2] Baseline** — run moving-average predictions
 - **[3] Train built-in** — enter the usual linear / cart / rnn / lstm flow
+
+### Troubleshooting
+
+- **Supabase “no forecast row” on deploy**: the compatibility probe first tries timestamps near “now” (5‑minute grid), then wider windows, then the **latest** test-table row for your `forecast_horizon_min`. If deploy still fails, your test table may have no rows for that horizon.
+- **Sklearn `InconsistentVersionWarning`**: train and deploy with the **same scikit-learn major/minor** (e.g. match Colab’s version in `pip freeze` on the VM) to avoid subtle prediction drift.
+- **Keras load errors (`quantization_config`, deserialize)**: the model was saved with **newer Keras** than your VM’s TensorFlow supports. Align exact versions between Colab and VM before training (current recommended pin for this project: `tensorflow==2.21.0`, `keras==3.12.1`), then re-save the `.keras` artifact.
 
 ### Security
 

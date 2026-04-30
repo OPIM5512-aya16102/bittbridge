@@ -90,13 +90,17 @@ def _row_std_across_stations(frame: pd.DataFrame) -> pd.Series:
     return frame.std(axis=1, ddof=0)
 
 
-def add_engineered_features(df: pd.DataFrame, feature_cfg: Dict) -> pd.DataFrame:
+def add_engineered_features(
+    df: pd.DataFrame,
+    feature_cfg: Dict,
+    timestamp_source: Optional[pd.Series] = None,
+) -> pd.DataFrame:
     """
     Feature families mirror manual notebook setup.
     All groups are gated by feature_cfg booleans (defaults are False in YAML).
     """
     out = df.copy()
-    ts = out[TIMESTAMP_COLUMN]
+    ts = timestamp_source if timestamp_source is not None else out[TIMESTAMP_COLUMN]
 
     if feature_cfg.get("use_time_features", False):
         out["hour"] = ts.dt.hour

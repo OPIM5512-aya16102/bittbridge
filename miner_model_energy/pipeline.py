@@ -36,6 +36,7 @@ from .split import temporal_train_val_split
 from .supabase_io import (
     create_supabase_data_client,
     fetch_supabase_test_row,
+    fetch_supabase_test_row_for_probe,
     fetch_supabase_train_all,
     fetch_supabase_train_tail,
     normalize_supabase_test_frame,
@@ -129,6 +130,22 @@ def _apply_supabase_storage_feature_shift(
             flush=True,
         )
     return shifted, True, steps
+
+
+def _shifted_timestamp_source_for_engineered_features(
+    train: pd.DataFrame,
+    config: ModelConfig,
+    feature_shift_active: bool,
+    feature_shift_steps: int,
+) -> pd.Series | None:
+    if not feature_shift_active or feature_shift_steps <= 0:
+        return None
+    if not (
+        config.features.get("use_time_features", False)
+        or config.features.get("use_cyclical_features", False)
+    ):
+        return None
+    return train[TIMESTAMP_COLUMN].shift(-feature_shift_steps)
 
 
 def _fmt_sec(seconds: float) -> str:
@@ -291,11 +308,17 @@ def prepare_training_data(
     train, feature_shift_active, feature_shift_steps = _apply_supabase_storage_feature_shift(
         train, config, show_progress=show_progress
     )
+    shifted_time_source = _shifted_timestamp_source_for_engineered_features(
+        train,
+        config,
+        feature_shift_active=feature_shift_active,
+        feature_shift_steps=feature_shift_steps,
+    )
 
     suffix_whitelist = config.features.get("include_weather_suffix_groups")
     train = filter_weather_suffix_columns(train, suffix_whitelist)
     test = filter_weather_suffix_columns(test, suffix_whitelist)
-    train = add_engineered_features(train, config.features)
+    train = add_engineered_features(train, config.features, timestamp_source=shifted_time_source)
     test = add_engineered_features(test, config.features)
 
     feats_cfg = config.features
@@ -643,6 +666,8 @@ def live_probe_feature_matrix_for_custom(
     timestamp_str: str,
     feature_list: List[str],
     sequence_n_steps: int | None,
+    *,
+    use_resilient_forecast_fetch: bool = False,
 ) -> tuple[np.ndarray, Dict[str, Any]]:
     """
     Build the same engineered feature matrix used at inference time for a custom plugin model.
@@ -697,14 +722,23 @@ def live_probe_feature_matrix_for_custom(
     try:
         client = create_supabase_data_client(data_cfg["supabase_url"], data_cfg["supabase_key"])
         history = fetch_supabase_train_tail(client, schema=schema, table=train_table, n_rows=needed_rows)
-        forecast_row = fetch_supabase_test_row(
-            client,
-            schema=schema,
-            table=test_table,
-            dt_target=timestamp_str,
-            horizon_min=horizon,
-            nearest_fallback_minutes=5,
-        )
+        if use_resilient_forecast_fetch:
+            forecast_row = fetch_supabase_test_row_for_probe(
+                client,
+                schema=schema,
+                table=test_table,
+                dt_target=timestamp_str,
+                horizon_min=horizon,
+            )
+        else:
+            forecast_row = fetch_supabase_test_row(
+                client,
+                schema=schema,
+                table=test_table,
+                dt_target=timestamp_str,
+                horizon_min=horizon,
+                nearest_fallback_minutes=5,
+            )
     except Exception as exc:
         raise ValueError(
             "Supabase live probe failed while fetching data "

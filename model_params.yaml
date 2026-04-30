@@ -111,6 +111,7 @@ data:
   # Minutes ahead for the challenge target; used for Supabase test-row fetch and training label shift.
   forecast_horizon_min: 360
   # Shift weather feature columns forward in training by this many minutes.
+  # When time/cyclical features are enabled, they are derived from the same shifted timestamp.
   # Applied only when data.source is supabase_storage.
   train_feature_time_shift_min: 360
   # When true and feature shift is active, keep label as current-row Total Load (skip horizon label shift).

@@ -13,7 +13,7 @@ import bittbridge
 
 # import base miner class which takes care of most of the boilerplate
 from bittbridge.base.miner import BaseMinerNeuron
-from bittbridge.utils.timestamp import get_now
+from bittbridge.utils.timestamp import get_now, round_minute_down, to_str
 from miner_model_energy.custom_plugin_runtime import (
     CustomPluginDeployState,
     list_plugin_folders,
@@ -383,7 +383,7 @@ def _run_custom_plugin_preflight(
     if picked is None:
         return PreflightResult(mode="exit"), False
 
-    probe_ts = get_now().isoformat()
+    probe_ts = to_str(round_minute_down(get_now(), 5))
     try:
         wrapper, seq_steps, _x = run_deploy_compatibility_probe(
             cfg, plugin_dir, picked, probe_ts
