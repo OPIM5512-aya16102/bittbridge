@@ -540,6 +540,27 @@ def test_fetch_supabase_test_row_returns_none_on_horizon_mismatch():
     assert row is None
 
 
+def test_fetch_supabase_test_row_for_probe_falls_back_to_latest_matching_horizon():
+    """When wall-clock has no row, probe path still finds latest row for that horizon."""
+    from miner_model_energy.supabase_io import fetch_supabase_test_row_for_probe
+
+    rows = [
+        {"dt": "2026-01-01 12:00:00", "horizon_min": 360, "4B8-tmpf": 40.0},
+        {"dt": "2026-03-15 18:00:00", "horizon_min": 360, "4B8-tmpf": 41.0},
+    ]
+    client = _FakeSupabaseClient({"test_table": rows})
+    row = fetch_supabase_test_row_for_probe(
+        client,
+        schema="hackathon",
+        table="test_table",
+        dt_target="2026-04-30T12:00:00-04:00",
+        horizon_min=360,
+    )
+    assert row is not None
+    assert int(row["horizon_min"]) == 360
+    assert row["dt"] == "2026-03-15 18:00:00"
+
+
 def test_required_history_rows_for_live_rnn_load_lag_24_covers_sequence_window():
     """After shift(max_lag), only tail rows are non-NaN in load_lag_*; fetch enough for RNN window."""
 
@@ -626,6 +647,7 @@ def test_prepare_training_data_supabase_storage_shift_mode_keeps_current_label(t
         tmp_path,
         train_path=train_path,
         test_path=test_path,
+        feature_patch={"use_time_features": True},
         data_patch={
             "source": "supabase_storage",
             "forecast_horizon_min": 10,
@@ -648,6 +670,7 @@ def test_prepare_training_data_supabase_storage_shift_mode_keeps_current_label(t
     assert TARGET_COLUMN_HORIZON not in train_model_frame.columns
     assert len(train_model_frame) == len(train_df) - 2  # 10 min on 5-min cadence => 2 shifted tail rows dropped
     assert float(train_model_frame["4B8-tmpf"].iloc[0]) == float(train_df["4B8-tmpf"].iloc[2])
+    assert int(train_model_frame["hour"].iloc[0]) == int(train_df["dt"].iloc[2].hour)
     assert float(train_model_frame[TARGET_COLUMN].iloc[0]) == float(train_df[TARGET_COLUMN].iloc[0])
 
 

@@ -7,9 +7,11 @@ from typing import Any, Optional
 from bittbridge.utils.iso_ne_api import fetch_fiveminute_system_load
 from bittbridge.utils.timestamp import get_now
 
+from .custom_plugin_runtime import CustomModelWrapper
 from .ml_config import ModelConfig
 from .pipeline import (
     TrainingResult,
+    live_probe_feature_matrix_for_custom,
     predict_for_timestamp_with_context,
     predict_single_test_row_with_context,
 )
@@ -68,6 +70,35 @@ class SupabaseLiveAdvancedPredictor:
     def predict(self, timestamp: str) -> Optional[float]:
         pred, ctx = predict_for_timestamp_with_context(self.result, self.config, timestamp)
         self.last_prediction_context = ctx
+        return pred
+
+
+@dataclass
+class CustomModelPredictor:
+    """
+    User-provided sklearn or Keras regression model; features match plugin feature_contract.json.
+    """
+
+    wrapper: CustomModelWrapper
+    config: ModelConfig
+    features: list[str]
+    sequence_n_steps: int | None = None
+    last_prediction_context: dict[str, Any] = None
+
+    def predict(self, timestamp: str) -> Optional[float]:
+        X, ctx = live_probe_feature_matrix_for_custom(
+            self.config,
+            timestamp,
+            self.features,
+            self.sequence_n_steps,
+        )
+        vals = self.wrapper.predict_values(X)
+        pred = float(vals.ravel()[0])
+        self.last_prediction_context = {
+            **ctx,
+            "custom_model_input_shape": list(X.shape),
+            "custom_model_kind": self.wrapper.kind,
+        }
         return pred
 
 
